@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>모션 인식 & 사인파 사운드</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #container {
+            position: relative;
+            width: 640px; /* 비디오/캔버스 크기 고정 */
+            height: 480px;
+            border: 1px solid black;
+        }
+        #video {
+            /* 비디오 원본은 숨김 */
+            display: none;
+            width: 100%;
+            height: 100%;
+            /* 좌우 반전이 필요하면 아래 주석 해제 */
+            /* transform: scaleX(-1); */
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+             /* 비디오와 동일하게 좌우 반전 필요시 주석 해제 */
+            /* transform: scaleX(-1); */
+        }
+        #status {
+            margin-top: 15px;
+            font-weight: bold;
+            color: #333;
+        }
+        p {
+            margin-bottom: 10px;
+        }
+    </style>
+    <!-- TensorFlow.js 라이브러리 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+</head>
+<body>
+    <h1>모션 인식 & 사인파 사운드</h1>
+    <p>오른손을 머리 위로 들어보세요!</p>
+
+    <div id="container">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    <div id="status">카메라 및 모델 준비 중...</div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        let detector;
+        let audioContext;
+        let isAudioReady = false;
+        let canPlaySound = true; // 사운드 연속 재생 방지 플래그
+        const soundCooldown = 1500; // 사운드 재생 후 쿨다운 시간 (ms)
+        const minConfidence = 0.3; // 키포인트 인식 최소 신뢰도
+
+        // --- Web Audio API 설정 ---
+        function initAudio() {
+            try {
+                // 오디오 컨텍스트 생성 (브라우저 호환성 고려)
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContext();
+                // 사용자 상호작용(클릭 등) 후 resume()이 필요할 수 있음 (브라우저 정책)
+                // 초기 로딩 시 resume() 시도
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                isAudioReady = true;
+                statusDiv.innerText = "오디오 준비 완료. 카메라/모델 로딩 중...";
+                console.log("AudioContext 생성 성공");
+            } catch (e) {
+                console.error("Web Audio API를 지원하지 않습니다.", e);
+                statusDiv.innerText = "오류: Web Audio API를 지원하지 않습니다.";
+                alert("Web Audio API를 지원하지 않는 브라우저입니다.");
+            }
+        }
+
+        // 사인파 사운드 재생 함수
+        function playSineWave(frequency = 440, duration = 0.3) {
+            if (!isAudioReady || !canPlaySound || !audioContext) return;
+
+            // 오디오 컨텍스트 상태 확인 및 재개 시도
+             if (audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log("AudioContext resumed successfully for playback.");
+                    actuallyPlaySineWave(frequency, duration);
+                }).catch(e => console.error("Error resuming AudioContext:", e));
+            } else {
+                 actuallyPlaySineWave(frequency, duration);
+            }
+        }
+
+        function actuallyPlaySineWave(frequency, duration) {
+             // 여러 번 호출 방지
+             canPlaySound = false;
+             console.log("사인파 재생 시도:", frequency, "Hz for", duration, "s");
+
+             const oscillator = audioContext.createOscillator();
+             const gainNode = audioContext.createGain(); // 볼륨 조절 및 클릭 방지
+
+             oscillator.type = 'sine'; // 파형 종류: sine, square, sawtooth, triangle
+             oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime); // 주파수 설정 (Hz)
+
+             // 볼륨 조절 (Fade out) - 갑자기 끊기지 않게
+             gainNode.gain.setValueAtTime(0.5, audioContext.currentTime); // 시작 볼륨
+             gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration); // 지정된 시간 후 볼륨을 0에 가깝게 줄임
+
+             // 노드 연결: Oscillator -> Gain -> Destination (스피커)
+             oscillator.connect(gainNode);
+             gainNode.connect(audioContext.destination);
+
+             // 소리 재생 시작 및 정지 예약
+             oscillator.start(audioContext.currentTime);
+             oscillator.stop(audioContext.currentTime + duration);
+
+             // 정지 후 정리 (선택적이지만 좋은 습관)
+             oscillator.onended = () => {
+                 console.log("사인파 재생 완료");
+                 oscillator.disconnect();
+                 gainNode.disconnect();
+             };
+
+             // 쿨다운 설정
+             setTimeout(() => {
+                 canPlaySound = true;
+             }, soundCooldown);
+        }
+
+
+        // --- 웹캠 설정 ---
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }, // 원하는 해상도 지정
+                    audio: false
+                });
+                video.srcObject = stream;
+
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.width = video.videoWidth;
+                        video.height = video.videoHeight;
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        resolve(video);
+                    };
+                });
+            } catch (error) {
+                console.error("카메라 접근 오류:", error);
+                statusDiv.innerText = "오류: 카메라에 접근할 수 없습니다.";
+                alert("카메라 접근 권한을 허용해주세요.");
+                throw error; // 에러를 다시 던져서 main 함수에서 처리하도록 함
+            }
+        }
+
+        // --- MoveNet 모델 로드 ---
+        async function loadDetector() {
+            try {
+                statusDiv.innerText = "TensorFlow.js 백엔드 준비 중...";
+                await tf.ready(); // TensorFlow.js 백엔드(예: WebGL) 준비 대기
+                statusDiv.innerText = "MoveNet 모델 로딩 중...";
+
+                const model = poseDetection.SupportedModels.MoveNet;
+                const detectorConfig = {
+                    // modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING // 빠름
+                    modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER // 정확함
+                };
+                detector = await poseDetection.createDetector(model, detectorConfig);
+
+                statusDiv.innerText = "모델 로드 완료. 감지를 시작합니다.";
+                console.log("MoveNet 모델 로드 완료");
+            } catch (error) {
+                console.error("모델 로드 오류:", error);
+                statusDiv.innerText = "오류: MoveNet 모델 로드에 실패했습니다.";
+                throw error;
+            }
+        }
+
+        // --- 포즈 감지 및 그리기 루프 ---
+        async function detectPose() {
+            if (!detector) return; // detector가 로드되지 않았으면 중단
+
+            try {
+                const poses = await detector.estimatePoses(video, {
+                    flipHorizontal: false // 웹캠 영상이 이미 반전되어 있다면 true로 설정
+                });
+
+                // 캔버스 클리어 및 비디오 프레임 그리기
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                if (poses && poses.length > 0) {
+                    const pose = poses[0]; // 단일 사용자 감지 가정
+                    drawKeypoints(pose.keypoints);
+                    drawSkeleton(pose.keypoints);
+                    checkRightHandUp(pose.keypoints); // 특정 포즈 확인
+                }
+            } catch (error) {
+                console.error("포즈 감지 중 오류:", error);
+                // detector 리소스 정리 필요시 추가
+                // detector.dispose();
+                // detector = null;
+                // statusDiv.innerText = "감지 중 오류 발생. 재시도합니다...";
+                // setTimeout(main, 5000); // 잠시 후 재시도 (선택적)
+            }
+
+            // 다음 프레임 요청
+            requestAnimationFrame(detectPose);
+        }
+
+        // 키포인트 그리기
+        function drawKeypoints(keypoints) {
+            ctx.fillStyle = 'Red'; // 점 색상
+            ctx.strokeStyle = 'White'; // 점 테두리 색상
+            ctx.lineWidth = 2;
+
+            for (const keypoint of keypoints) {
+                if (keypoint.score >= minConfidence) {
+                    const { x, y } = keypoint;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 5, 0, 2 * Math.PI); // 점 크기
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // 스켈레톤(뼈대) 그리기
+        function drawSkeleton(keypoints) {
+            ctx.fillStyle = 'White';
+            ctx.strokeStyle = 'White'; // 선 색상
+            ctx.lineWidth = 2; // 선 두께
+
+            // MoveNet 모델의 표준 연결 정보 사용
+            const adjacentPairs = poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet);
+
+            adjacentPairs.forEach(([i, j]) => {
+                const kp1 = keypoints[i];
+                const kp2 = keypoints[j];
+
+                // 두 키포인트 모두 신뢰도 임계값을 넘어야 선을 그림
+                if (kp1.score >= minConfidence && kp2.score >= minConfidence) {
+                    ctx.beginPath();
+                    ctx.moveTo(kp1.x, kp1.y);
+                    ctx.lineTo(kp2.x, kp2.y);
+                    ctx.stroke();
+                }
+            });
+        }
+
+        // 이름으로 키포인트 찾기 헬퍼 함수
+        function getKeypointByName(keypoints, name) {
+            return keypoints.find(kp => kp.name === name);
+        }
+
+        // 오른손 들기 포즈 확인 함수
+        function checkRightHandUp(keypoints) {
+            const rightWrist = getKeypointByName(keypoints, 'right_wrist');
+            const rightShoulder = getKeypointByName(keypoints, 'right_shoulder');
+            // const rightEar = getKeypointByName(keypoints, 'right_ear'); // 머리 위치 참고용
+
+            // 필요한 키포인트가 모두 인식되었는지 확인 (신뢰도 포함)
+            if (rightWrist && rightWrist.score >= minConfidence &&
+                rightShoulder && rightShoulder.score >= minConfidence) {
+
+                // 오른손목(Y 좌표)이 오른쪽 어깨(Y 좌표)보다 위에 있는지 확인
+                // Y 좌표는 화면 상단이 0, 하단으로 갈수록 커짐
+                if (rightWrist.y < rightShoulder.y - 20) { // 약간의 여유(20px)를 둠
+                     console.log("오른손 들기 감지!");
+                     playSineWave(523.25, 0.4); // 도(C5) 음, 0.4초간 재생
+                 }
+            }
+        }
+
+
+        // --- 메인 실행 함수 ---
+        async function main() {
+            try {
+                // 1. 오디오 초기화 (사용자 상호작용 전에 시도)
+                initAudio();
+
+                // 2. 카메라 설정
+                statusDiv.innerText = "카메라 접근 권한을 요청합니다...";
+                await setupCamera();
+                video.play(); // 비디오 재생 시작 (숨겨져 있어도 필요)
+                statusDiv.innerText = "카메라 준비 완료.";
+
+                // 3. 모델 로드
+                await loadDetector();
+
+                // 4. 감지 루프 시작
+                detectPose();
+
+            } catch (error) {
+                console.error("초기화 실패:", error);
+                statusDiv.innerText = "초기화 중 오류가 발생했습니다. 콘솔을 확인하세요.";
+                // 여기서 더 이상 진행하지 않음
+            }
+        }
+
+        // 페이지 로드 완료 후 메인 함수 실행
+        window.addEventListener('load', main);
+
+        // (선택 사항) 페이지 클릭 시 오디오 컨텍스트 재개 시도
+        document.body.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log('AudioContext resumed on user interaction.');
+                }).catch(e => console.error('Error resuming AudioContext on click:', e));
+            }
+        }, { once: true }); // 한 번만 실행
+
+    </script>
+</body>
+</html>
