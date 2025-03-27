@@ -1,6 +1,7 @@
 # JavaScript Pose Estimation with Web Audio Feedback (js-pose-estimation-web-audio)
 
 [![GitHub](https://img.shields.io/badge/GitHub-hwkims-blue?logo=github)](https://github.com/hwkims)
+![스크린샷(29)](https://github.com/user-attachments/assets/e0cd4b8e-a824-4586-ba6e-efe2b90b15d3)
 
 This project demonstrates real-time human pose estimation in the browser using a webcam feed. It utilizes TensorFlow.js with the MoveNet model to detect body keypoints. When a specific pose (raising the right hand above the shoulder) is detected, it triggers a sine wave sound generated using the Web Audio API.
 
